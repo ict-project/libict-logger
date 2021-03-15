@@ -1,0 +1,6 @@
+#include "disable-crit.hpp"
+#include "disable-err.hpp"
+#include "disable-warn.hpp"
+#include "disable-info.hpp"
+#include "disable-notice.hpp"
+#include "disable-debug.hpp"
