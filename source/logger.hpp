@@ -159,20 +159,17 @@ namespace input {
   //!
   std::ostream & ostream(flags_t severity);
   //! Strumień na niby.
-  class dummy_stream: public std::ostream {
+  class dummy_stream  {//! Nic nie robi.
   public:
-    //! Nic nie robi.
-    template <typename Any> dummy_stream & operator<<(Any a){
-        return(*this);
-    }
-    //! Nic nie robi.
-    dummy_stream & operator<<(std::ostream & (*f)(std::ostream&)){
-      return(*this);
-    }
-    //! Nic nie robi.
-    dummy_stream & operator<<(std::ios & (*f)(std::ios&)){
-      return(*this);
-    }
+    template <typename Any> dummy_stream & operator<<(Any a){return(*this);}
+    dummy_stream & operator<<(std::ostream & (*f)(std::ostream&)){return(*this);}
+    dummy_stream & operator<<(std::ios & (*f)(std::ios&)){return(*this);}
+    dummy_stream & put (char c){return(*this);}
+    dummy_stream & write (const char* s, std::size_t n){return(*this);}
+    std::size_t tellp(){return(0);}
+    dummy_stream & seekp (std::size_t pos){return(*this);}
+    dummy_stream & seekp (std::size_t off, std::ios_base::seekdir way){return(*this);}
+    dummy_stream & flush(){return(*this);}
   };
   //! Strumień na niby.
   dummy_stream & dummy();
