@@ -1,5 +1,5 @@
 ################################################################
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.30)
 ################################################################
 set(LIBRARY_NAME "logger")
 set(LIBRARY_DESC "Library with logger service.")
@@ -36,19 +36,19 @@ find_package(Threads)
 
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/info.hpp 
-  PRE_BUILD COMMAND ./info.sh ${LIBRARY_NAME} info.hpp
+  COMMAND ./info.sh ${LIBRARY_NAME} info.hpp
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/info.sh
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/info.cpp 
-  PRE_BUILD COMMAND ./info.sh ${LIBRARY_NAME} info.cpp
+  COMMAND ./info.sh ${LIBRARY_NAME} info.cpp
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/info.hpp ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/all.hpp 
-  PRE_BUILD COMMAND ./all.sh 
+  COMMAND ./all.sh 
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/all.sh ${CMAKE_CURRENT_SOURCE_DIR}/info.hpp 
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
