@@ -23,16 +23,15 @@ set(CMAKE_SOURCE_FILES
 
 add_library(ict-static-${LIBRARY_NAME} STATIC ${CMAKE_SOURCE_FILES})
 target_link_libraries(ict-static-${LIBRARY_NAME} ${CMAKE_THREAD_LIBS_INIT})
-target_link_libraries(ict-static-${LIBRARY_NAME} ${CMAKE_LINK_LIBS})
 set_target_properties(ict-static-${LIBRARY_NAME}  PROPERTIES OUTPUT_NAME ict-${LIBRARY_NAME})
 
 add_library(ict-shared-${LIBRARY_NAME} SHARED ${CMAKE_SOURCE_FILES})
 target_link_libraries(ict-shared-${LIBRARY_NAME} ${CMAKE_THREAD_LIBS_INIT})
-target_link_libraries(ict-shared-${LIBRARY_NAME} ${CMAKE_LINK_LIBS})
 set_target_properties(ict-shared-${LIBRARY_NAME}  PROPERTIES OUTPUT_NAME ict-${LIBRARY_NAME})
 
 add_executable(${PROJECT_NAME}-test ${CMAKE_HEADER_LIST} test.hpp test.cpp ${CMAKE_SOURCE_FILES})
 target_link_libraries(${PROJECT_NAME}-test ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${PROJECT_NAME}-test ict-static-${LIBRARY_NAME})
 target_link_libraries(${PROJECT_NAME}-test ${CMAKE_LINK_LIBS})
 target_compile_definitions(${PROJECT_NAME}-test PUBLIC -DENABLE_TESTING)
 

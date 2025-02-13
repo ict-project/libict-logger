@@ -4,6 +4,11 @@ CONTAINER_TYPE="Host Alpine Ubuntu Debian Fedora"
 
 for build in $BUILD_TYPE; do
   for container in $CONTAINER_TYPE; do
-    ./configure.sh $build $container && make && make test && make package
+    if ./configure.sh $build $container && make && make test && make package; then
+      echo "Build $build on $container succeeded"
+    else
+      echo "Build $build on $container failed"
+      exit 1
+    fi
   done
 done
