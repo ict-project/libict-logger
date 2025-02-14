@@ -29,7 +29,7 @@ add_library(ict-shared-${LIBRARY_NAME} SHARED ${CMAKE_SOURCE_FILES})
 target_link_libraries(ict-shared-${LIBRARY_NAME} ${CMAKE_THREAD_LIBS_INIT})
 set_target_properties(ict-shared-${LIBRARY_NAME}  PROPERTIES OUTPUT_NAME ict-${LIBRARY_NAME})
 
-add_executable(${PROJECT_NAME}-test ${CMAKE_HEADER_LIST} test.cpp ${CMAKE_SOURCE_FILES})
+add_executable(${PROJECT_NAME}-test ${CMAKE_HEADER_LIST} test.cpp)
 target_link_libraries(${PROJECT_NAME}-test ${CMAKE_THREAD_LIBS_INIT})
 target_link_libraries(${PROJECT_NAME}-test ict-static-${LIBRARY_NAME})
 target_link_libraries(${PROJECT_NAME}-test ${CMAKE_LINK_LIBS})
