@@ -36,18 +36,20 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //============================================
 #include "logger.hpp"
 #include <ctime>
-#include <sstream>
+#include <cstring>
 #include <string>
 #include <streambuf>
+#include <array>
 #include <map>
 #include <vector>
-#include <set>
 #include <stack>
 #include <mutex>
+#include <shared_mutex>
 #include <memory>
+#include <utility>
 #include <iostream>
 #include <filesystem>
-#include "syslog.h"
+#include <syslog.h>
 //============================================
 #define TRY_BEGIN try {
 #define TRY_END } catch (...) { \
@@ -61,19 +63,22 @@ struct timestamp_t {
   void setTime(){t=std::time(nullptr);}
   std::time_t t; 
 };
-std::ostream & operator<<(std::ostream & os,const timestamp_t & t){
+//! Formatuje timestamp do podanego bufora (bez ostringstream). Zwraca liczbę znaków.
+static std::size_t formatTimestamp(const timestamp_t & t,char * buf,std::size_t size){
     //localtime_r zamiast std::localtime (wspólny statyczny bufor - wyścig danych między wątkami).
     std::tm tm{};
     ::localtime_r(&(t.t),&tm);
+    return(std::strftime(buf,size,"%F %T(%z)",&tm));
+}
+std::ostream & operator<<(std::ostream & os,const timestamp_t & t){
     char buf[64];
-    const std::size_t size(std::strftime(buf,sizeof(buf),"%F %T(%z)",&tm));
-    os.write(buf,size);
+    os.write(buf,formatTimestamp(t,buf,sizeof(buf)));
     return(os);
 }
 typedef std::map<const char *,std::string> path_map_t;
-//! Mutex chroniący cache ścieżek plików i katalog bazowy.
-static std::mutex & getPathMutex(){
-  static std::mutex mutex;
+//! Mutex (RW) chroniący cache ścieżek plików i katalog bazowy (odczyt na każdą linię loga - dominuje).
+static std::shared_mutex & getPathMutex(){
+  static std::shared_mutex mutex;
   return(mutex);
 }
 static path_map_t & getPathMap(){
@@ -85,12 +90,21 @@ static std::string & getBaseDir(){
   return(base_dir);
 }
 void setBaseDir(const std::string & file){
-  std::lock_guard<std::mutex> lock(getPathMutex());
+  std::lock_guard<std::shared_mutex> lock(getPathMutex());
   getBaseDir()=std::filesystem::path(file).parent_path().native();
   getPathMap().clear();
 }
 std::ostream & operator<<(std::ostream & os,file_struct f){
-    std::lock_guard<std::mutex> lock(getPathMutex());
+    {//Szybka ścieżka - odczyt z cache pod blokadą współdzieloną.
+        std::shared_lock<std::shared_mutex> lock(getPathMutex());
+        path_map_t::const_iterator it(getPathMap().find(f.path));
+        if (it!=getPathMap().end()){
+            os<<it->second;
+            return(os);
+        }
+    }
+    std::lock_guard<std::shared_mutex> lock(getPathMutex());
+    //Ponowne sprawdzenie - inny wątek mógł w międzyczasie uzupełnić cache.
     path_map_t::iterator it(getPathMap().find(f.path));
     if (it==getPathMap().end()) {
         std::string path(
@@ -134,6 +148,18 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       case debug: return("DEBUG");
       default: return("");
     }
+  }
+  //! Liczba poziomów logowania.
+  constexpr std::size_t severity_count=6;
+  //! Sprawdza, czy podana wartość to dokładnie jeden prawidłowy poziom logowania (bez std::set).
+  inline bool is_single_severity(flags_t severity){
+    return(severity&&(!(severity&(severity-1)))&&(severity&all));
+  }
+  //! Indeks poziomu logowania (pozycja bitu) - tylko dla prawidłowego pojedynczego poziomu.
+  inline std::size_t severity_index(flags_t severity){
+    std::size_t index=0;
+    while (!(severity&0x1)){severity>>=1;++index;}
+    return(index);
   }
   //==========================================================================
   class Syslog{
@@ -202,8 +228,8 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       std::mutex mutex;
       //! Zestaw strumieni wyjściowych ostream.
       ostream_map_t ostream_map;
-      //! Wskaźnik na obieg obsługujący syslog.
-      std::unique_ptr<Syslog> syslog;
+      //! Wskaźnik na obieg obsługujący syslog (shared_ptr - log_out używa go poza blokadą mutex).
+      std::shared_ptr<Syslog> syslog;
     };
     static Data & data(){
       static Data data;
@@ -232,10 +258,10 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       std::lock_guard<std::mutex> lock(data().mutex);
       if (filter){
         //Najpierw closelog() starego obiektu, dopiero potem openlog() nowego.
-        data().syslog.reset(nullptr);
+        data().syslog.reset();
         data().syslog.reset(new Syslog(ident,filter));
       } else if (data().syslog.get()) {
-        data().syslog.reset(nullptr);
+        data().syslog.reset();
       }
       TRY_END
     }
@@ -260,45 +286,50 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     static void log_out(const log_line_t<char> & in){
       TRY_BEGIN
       std::vector<std::shared_ptr<StreamSink>> streams;
-      bool syslog_enabled=false;
+      std::shared_ptr<Syslog> syslog;
       {
         std::lock_guard<std::mutex> lock(data().mutex);
         for (const auto & entry:data().ostream_map){
           if (in.severity&entry.second->filter) streams.push_back(entry.second);
         }
-        syslog_enabled=data().syslog&&((in.severity)&data().syslog->getFilter());
+        //Kopia shared_ptr - zapis do sysloga poza blokadą data().mutex.
+        if (data().syslog&&((in.severity)&data().syslog->getFilter())) syslog=data().syslog;
       }
-      if (streams.empty()&&!syslog_enabled) return;
+      if (streams.empty()&&!syslog) return;
 
-      std::ostringstream timestamp_out;
-      timestamp_out<<in.time;
-      const std::string timestamp(timestamp_out.str());
+      char timestamp[64];
+      const std::size_t timestamp_size(formatTimestamp(in.time,timestamp,sizeof(timestamp)));
       const char * severity(get_log_severity(in.severity));
+      const std::size_t severity_size(std::strlen(severity));
 
       if (!streams.empty()){
-        std::ostringstream message_out;
-        message_out<<timestamp<<' ';
-        if (in.buffered) message_out<<"| ";
-        message_out<<severity<<' '<<in.line<<'\n';
-        const std::string message(message_out.str());
+        std::string message;
+        message.reserve(timestamp_size+severity_size+in.line.size()+5);
+        message.append(timestamp,timestamp_size);
+        message+=' ';
+        if (in.buffered) message+="| ";
+        message+=severity;
+        message+=' ';
+        message+=in.line;
+        message+='\n';
         for (const std::shared_ptr<StreamSink> & sink:streams){
           std::lock_guard<std::mutex> lock(sink->mutex);
-          *sink->stream<<message;
+          sink->stream->write(message.data(),message.size());
           sink->stream->flush();
         }
       }
 
-      if (syslog_enabled){
+      if (syslog){
         std::string message;
+        message.reserve(timestamp_size+severity_size+in.line.size()+4);
         if (in.buffered){//Ten sam format, co dla strumieni: timestamp przed "| ".
-          message=timestamp;
+          message.append(timestamp,timestamp_size);
           message+=" | ";
         }
         message+=severity;
         message+=' ';
         message+=in.line;
-        std::lock_guard<std::mutex> lock(data().mutex);
-        if (data().syslog) data().syslog->log(in.severity,message);
+        syslog->log(in.severity,message);
       }
       TRY_END
     }
@@ -416,7 +447,7 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
         const static std::size_t max(1000);//Maksymalny rozmiar bufora.
           if (log_buffer){
             if (log_buffer->size()<max){//Jeśli mniejszy, niż maksymalny rozmiar.
-              log_buffer->push_back(log_line);//Dodaj do bufora.
+              log_buffer->push_back(std::move(log_line));//Dodaj do bufora (move - startLine() i tak czyści linię).
             } else {
                 if (log_buffer->size()==max) {
                   log_line_t<char> log_warn;
@@ -428,7 +459,7 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
                   log_warn.line+="Bufor loggera osiągnął maksymalny rozmiar!";
                   log_warn.severity=warning;
                   output::log_out(log_warn);//Zapisz do skonfigurowanych wyjść.
-                  log_buffer->push_back(log_line);//Dodaj do bufora.
+                  log_buffer->push_back(std::move(log_line));//Dodaj do bufora (move - startLine() i tak czyści linię).
                 }
             }
           }
@@ -499,8 +530,7 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     typename charT=char,
     typename traits=std::char_traits<charT>
   > 
-  class Single:
-    public std::basic_ostringstream<charT,traits> 
+  class Single
   {
   public:
     typedef logger::Buffer<charT,traits> logger_buffer_t;
@@ -516,9 +546,8 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
         buffer(severity,buffered,log_buffer),stream(&buffer)
       {}
     };
-    typedef std::map<ict::logger::flags_t,std::unique_ptr<StreamPack>> stream_map_t;
-    //! Mapa logerów dla różnych poziomów.
-    stream_map_t logger_map;
+    //! Logery dla poszczególnych poziomów (indeks to pozycja bitu poziomu - severity_index()).
+    std::array<std::unique_ptr<StreamPack>,severity_count> logger_map;
     //! Poziomy logowania bez buforowania na tej warstwie.
     ict::logger::flags_t direct;
     //! Poziomy logowania, które powodują opróżnienie bufora na tej warstwie.
@@ -564,16 +593,13 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       static thread_local BlackHole<charT> blackHoleBuff;
       static thread_local basic_ostream_t blackHole(&blackHoleBuff);
       TRY_BEGIN
-      const static std::set<ict::logger::flags_t> severity_set({
-        critical,error,warning,
-        notice,info,debug
-      });
       done|=severity;//Zaznacz, że był taki.
-      if ((severity_set.count(severity))&&(active&severity)){//Jeśli poziom logowania jest prawidłowy i aktywny na tej warstwie.
-        if (!logger_map.count(severity)){//Jeśli loger na takim poziomie nie istnieje
-          logger_map[severity].reset(new StreamPack(severity,!(severity&direct),&log_buffer));//Stwórz logera.
+      if (is_single_severity(severity)&&(active&severity)){//Jeśli poziom logowania jest prawidłowy i aktywny na tej warstwie.
+        std::unique_ptr<StreamPack> & pack(logger_map[severity_index(severity)]);
+        if (!pack){//Jeśli loger na takim poziomie nie istnieje
+          pack.reset(new StreamPack(severity,!(severity&direct),&log_buffer));//Stwórz logera.
         }
-        return(logger_map[severity]->stream);//Zwróć go.
+        return(pack->stream);//Zwróć go.
       }
       TRY_END
       return(blackHole);

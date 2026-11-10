@@ -161,7 +161,7 @@ namespace input {
   //! Strumień na niby.
   class dummy_stream  {//! Nic nie robi.
   public:
-    template <typename Any> dummy_stream & operator<<(Any a){return(*this);}
+    template <typename Any> dummy_stream & operator<<(const Any & a){return(*this);}
     dummy_stream & operator<<(std::ostream & (*f)(std::ostream&)){return(*this);}
     dummy_stream & operator<<(std::ios & (*f)(std::ios&)){return(*this);}
     dummy_stream & put (char c){return(*this);}
