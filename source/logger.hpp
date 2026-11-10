@@ -47,7 +47,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define LOGGER_SET(stream,...) ict::logger::output::set(stream,##__VA_ARGS__)
 //! Makro sprawdzające ustawienia strumienia wyjściowego.
 #define LOGGER_TEST(stream) ict::logger::output::test(stream) 
-//! Makro restartujące loggera (cały stos jest kasowany).
+//! Makro restartujące loggera (stos logerów bieżącego wątku jest kasowany).
 #define LOGGER_RESTART ict::logger::restart()
 //! Makro ustawiające wartości domyślne dla warstw logowania.
 #define LOGGER_DEFAULT(...) ict::logger::input::setDefault(__VA_ARGS__)
@@ -175,7 +175,7 @@ namespace input {
   dummy_stream & dummy();
 }
 //!
-//! @brief Restartuje loggera (cały stos jest kasowany).
+//! @brief Restartuje loggera (stos logerów bieżącego wątku jest kasowany).
 //!
 void restart();
 //!

@@ -35,7 +35,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **************************************************************/
 //============================================
 #include "logger.hpp"
-#include <iomanip>
+#include <ctime>
 #include <sstream>
 #include <string>
 #include <streambuf>
@@ -44,7 +44,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 #include <stack>
 #include <mutex>
-#include <thread>
 #include <iostream>
 #include <filesystem>
 #include "syslog.h"
@@ -62,10 +61,20 @@ struct timestamp_t {
   std::time_t t; 
 };
 std::ostream & operator<<(std::ostream & os,const timestamp_t & t){
-    os<<std::put_time(std::localtime(&(t.t)),"%F %T(%z)");
+    //localtime_r zamiast std::localtime (wspólny statyczny bufor - wyścig danych między wątkami).
+    std::tm tm{};
+    ::localtime_r(&(t.t),&tm);
+    char buf[64];
+    const std::size_t size(std::strftime(buf,sizeof(buf),"%F %T(%z)",&tm));
+    os.write(buf,size);
     return(os);
 }
 typedef std::map<const char *,std::string> path_map_t;
+//! Mutex chroniący cache ścieżek plików i katalog bazowy.
+static std::mutex & getPathMutex(){
+  static std::mutex mutex;
+  return(mutex);
+}
 static path_map_t & getPathMap(){
   static path_map_t map;
   return(map);
@@ -75,18 +84,22 @@ static std::string & getBaseDir(){
   return(base_dir);
 }
 void setBaseDir(const std::string & file){
+  std::lock_guard<std::mutex> lock(getPathMutex());
   getBaseDir()=std::filesystem::path(file).parent_path().native();
   getPathMap().clear();
 }
 std::ostream & operator<<(std::ostream & os,file_struct f){
-    if (!getPathMap().count(f.path)) {
-        if (getBaseDir().size()){
-          getPathMap()[f.path]=std::filesystem::relative(f.path,getBaseDir()).native();
-        } else {
-          getPathMap()[f.path]=std::string(f.path);
-        }
+    std::lock_guard<std::mutex> lock(getPathMutex());
+    path_map_t::iterator it(getPathMap().find(f.path));
+    if (it==getPathMap().end()) {
+        std::string path(
+          getBaseDir().size()?
+            std::filesystem::relative(f.path,getBaseDir()).native():
+            std::string(f.path)
+        );
+        it=getPathMap().emplace(f.path,std::move(path)).first;
     }
-    os<<getPathMap().at(f.path);
+    os<<it->second;
     return(os);
 }
 
@@ -356,19 +369,91 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     //! 
     ~Buffer(){}
     //!
-    //! @brief Filtruje znaki char.
+    //! @brief Filtruje znaki.
     //! 
-    static char charFilter(char c,Buffer<char>*p){
-      static const std::map<char,char> char_map({
-        {'\t',' '},//Zamiana na spacje.
-        {'\v',' '},
-        {'\0',' '},
-        {'\n',0},//Zero oznacza koniec linii.
-        {'\r',0}
-      });
-      if (char_map.count(c)) return(char_map.at(c));
-      return(c);
+    //! @param [in] c Przetwarzany znak.
+    //! @return Przetworzony znak (0 oznacza koniec linii).
+    //!
+    static charT charFilter(charT c){
+      switch (c){
+        case '\t'://Zamiana na spacje.
+        case '\v':
+        case '\0':
+          return(' ');
+        case '\n'://Zero oznacza koniec linii.
+        case '\r':
+          return(0);
+        default:
+          return(c);
+      }
     }
+  private:
+    //!
+    //! @brief Rozpoczyna nowy wpis loga (jeśli jeszcze nie został rozpoczęty).
+    //! 
+    void startLine(){
+      if (newline) {
+        //Jeśli rozpoczyna się nowy wpis, to pobierz aktualny czas.
+        log_line.time.setTime();
+        //Oznacz, że linia się rozpoczyna.
+        newline=false;
+        //Wyczyść linię.
+        log_line.line.clear();
+      }
+    }
+    //!
+    //! @brief Kończy bieżący wpis loga (ignoruje powtarzające się znaki nowej linii).
+    //! 
+    void endLine(){
+      if (newline) {
+        //Ignoruj powtarzające się jeden po drugim.
+        return;
+      }
+      //Oznacz nową linię.
+      newline=true;
+      if (log_line.buffered){//Jeśli zapis jest buforowany.
+        const static std::size_t max(1000);//Maksymalny rozmiar bufora.
+          if (log_buffer){
+            if (log_buffer->size()<max){//Jeśli mniejszy, niż maksymalny rozmiar.
+              log_buffer->push_back(log_line);//Dodaj do bufora.
+            } else {
+                if (log_buffer->size()==max) {
+                  log_line_t<char> log_warn;
+                  log_warn.buffered=true;
+                  log_warn.line="logger.cpp";
+                  log_warn.line+=" (";
+                  log_warn.line+=__PRETTY_FUNCTION__;
+                  log_warn.line+=") ";
+                  log_warn.line+="Bufor loggera osiągnął maksymalny rozmiar!";
+                  log_warn.severity=warning;
+                  output::log_stream_out(log_warn);//Zapisz w strumieniach wyjściowych.
+                  output::log_syslog_out(log_warn);//Zapisz w syslog.
+                  log_buffer->push_back(log_line);//Dodaj do bufora.
+                }
+            }
+          }
+      } else {//Jeśli zapis nie jest buforowany.
+        output::log_stream_out(log_line);//Zapisz w strumieniach wyjściowych.
+        output::log_syslog_out(log_line);//Zapisz w syslog.
+      }
+    }
+    //!
+    //! @brief Przetwarza jeden znak (po przefiltrowaniu).
+    //! 
+    //! @param [in] c Przetwarzany znak.
+    //!
+    void putChar(charT c){
+      //! Przetwarzany znak.
+      charT znak(charFilter(c));
+      if (znak){//Nie było znaku nowej linii
+        startLine();
+        //Wstaw przetwarzany znak.
+        log_line.line+=znak;
+      } else {//Pojawił się znak nowej linii
+        endLine();
+      }
+    }
+  protected:
     //!
     //! @brief Przetwarza jeden znak.
     //! 
@@ -377,56 +462,36 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     //!
     int_type_t overflow (int_type_t c){
       TRY_BEGIN
-      //! Przetwarzany znak.
-      int_type_t znak(charFilter(c,this));
-      if (znak){//Nie było znaku nowej linii
-        if (newline) {
-          //Jeśli rozpoczyna się nowy wpis, to pobierz aktualny czas.
-          log_line.time.setTime();
-          //Oznacz, że linia się rozpoczyna.
-          newline=false;
-          //Wyczyść linię.
-          log_line.line.clear();
-        }
-        //Wstaw przetwarzany znak.
-        log_line.line+=znak;
-      } else {//Pojawił się znak nowej linii
-        //Jeśli znaki nowej linii.
-        if (newline) {
-          //Ignoruj powtarzające się jeden po drugim.
-          return(c);
-        }
-        //Oznacz nową linię.
-        newline=true;
-        if (log_line.buffered){//Jeśli zapis jest buforowany.
-          const static std::size_t max(1000);//Maksymalny rozmiar bufora.
-            if (log_buffer){
-              if (log_buffer->size()<max){//Jeśli mniejszy, niż maksymalny rozmiar.
-                log_buffer->push_back(log_line);//Dodaj do bufora.
-              } else {
-                  if (log_buffer->size()==max) {
-                    log_line_t<char> log_warn;
-                    log_warn.buffered=true;
-                    log_warn.line="logger.cpp";
-                    log_warn.line+=" (";
-                    log_warn.line+=__PRETTY_FUNCTION__;
-                    log_warn.line+=") ";
-                    log_warn.line+="Bufor loggera osiągnął maksymalny rozmiar!";
-                    log_warn.severity=warning;
-                    output::log_stream_out(log_warn);//Zapisz w strumieniach wyjściowych.
-                    output::log_syslog_out(log_warn);//Zapisz w syslog.
-                    log_buffer->push_back(log_line);//Dodaj do bufora.
-                  }
-              }
-            }
-        } else {//Jeśli zapis nie jest buforowany.
-          output::log_stream_out(log_line);//Zapisz w strumieniach wyjściowych.
-          output::log_syslog_out(log_line);//Zapisz w syslog.
-        }
-      }
+      if (traits::eq_int_type(c,traits::eof())) return(traits::not_eof(c));
+      putChar(traits::to_char_type(c));
       TRY_END
       //Zakończ.
       return(c);
+    }
+    //!
+    //! @brief Przetwarza blok znaków (zamiast wirtualnego wywołania overflow dla każdego znaku).
+    //! 
+    //! @param [in] s Wskaźnik na blok znaków.
+    //! @param [in] n Liczba znaków.
+    //! @return Liczba przetworzonych znaków.
+    //!
+    std::streamsize xsputn(const charT * s,std::streamsize n){
+      TRY_BEGIN
+      std::streamsize i=0;
+      while (i<n){
+        std::streamsize start(i);
+        while ((i<n)&&(charFilter(s[i])==s[i])) ++i;//Ciąg zwykłych znaków.
+        if (i>start){
+          startLine();
+          log_line.line.append(s+start,i-start);//Dodaj cały ciąg na raz.
+        }
+        while ((i<n)&&(charFilter(s[i])!=s[i])){//Znaki wymagające filtrowania.
+          putChar(s[i]);
+          ++i;
+        }
+      }
+      TRY_END
+      return(n);
     }
   };
   //==========================================================================
@@ -517,7 +582,7 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
   };
   typedef Single<char> single_char_t;
   //==========================================================================
-  //! Klasa obsługująca stos logerów.
+  //! Klasa obsługująca stos logerów (jedna instancja na wątek - nie wymaga synchronizacji).
   template <
     typename charT=char,
     typename traits=std::char_traits<charT>
@@ -528,8 +593,6 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     typedef Single<charT,traits> single_t;
     typedef std::stack<std::unique_ptr<single_t>> stack_t;
   private:
-    //! Muteks stosu logerów,
-    std::mutex stack_mutex;
     //! Stos logerów,
     stack_t stack;
   public:
@@ -537,7 +600,6 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     //! @brief Podaje referencję do najwyższego logera.
     //! 
     single_t & operator ()(){
-      std::lock_guard<std::mutex> lock(stack_mutex);
       return(*(stack.top()));
     }
     //!
@@ -553,7 +615,6 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       ict::logger::flags_t buffered_in,
       ict::logger::flags_t dump_in
     ){
-      std::lock_guard<std::mutex> lock(stack_mutex);
       stack.emplace(new single_t(direct_in,buffered_in,dump_in));
       return(stack.size());
     }
@@ -563,7 +624,6 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     //! @return Liczba logerów na stosie.
     //!
     std::size_t pop(){
-      std::lock_guard<std::mutex> lock(stack_mutex);
       if (stack.size()>0){
         stack.pop();
       }
@@ -575,17 +635,21 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     //! @return Liczba logerów na stosie.
     //!
     std::size_t size(){
-      std::lock_guard<std::mutex> lock(stack_mutex);
       return(stack.size());
+    }
+    //!
+    //! @brief Kasuje cały stos.
+    //! 
+    void clear(){
+      while (!stack.empty()) stack.pop();
     }
   };
   //==========================================================================
-  //! Mapa stosów logerów dla wątków (char).
+  //! Stos logerów dla bieżącego wątku (char).
   typedef Stack<char> stack_char_t;
-  typedef std::map<std::thread::id,stack_char_t> stack_map_char_t;
-  static stack_map_char_t & get_map_char(){
-    static stack_map_char_t map_char;
-    return(map_char);
+  static stack_char_t & get_stack_char(){
+    static thread_local stack_char_t stack;
+    return(stack);
   }
   //==========================================================================
   namespace input {
@@ -621,37 +685,28 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       ict::logger::flags_t dump_in
     ){
       TRY_BEGIN
-      std::lock_guard<std::mutex> lock(data().mutex);
-      std::thread::id id(std::this_thread::get_id());//Ustal ID wątku.
-      if (ict::logger::defaultValue&direct_in) direct_in=data().directDefault;//Jeśli wartość domyślna.
-      if (ict::logger::defaultValue&buffered_in) buffered_in=data().bufferedDefault;//Jeśli wartość domyślna.
-      if (ict::logger::defaultValue&dump_in) dump_in=data().dumpDefault;//Jeśli wartość domyślna.
-      get_map_char()[id].push(direct_in,buffered_in,dump_in);//Dodaj stos logerów char dla tej warstwy.
+      if (ict::logger::defaultValue&(direct_in|buffered_in|dump_in)){//Jeśli któryś parametr ma wartość domyślną.
+        std::lock_guard<std::mutex> lock(data().mutex);
+        if (ict::logger::defaultValue&direct_in) direct_in=data().directDefault;//Jeśli wartość domyślna.
+        if (ict::logger::defaultValue&buffered_in) buffered_in=data().bufferedDefault;//Jeśli wartość domyślna.
+        if (ict::logger::defaultValue&dump_in) dump_in=data().dumpDefault;//Jeśli wartość domyślna.
+      }
+      get_stack_char().push(direct_in,buffered_in,dump_in);//Dodaj logera char dla tej warstwy na stosie tego wątku.
       TRY_END
     }
     Layer::~Layer(){
       TRY_BEGIN
-      std::lock_guard<std::mutex> lock(data().mutex);
-      std::thread::id id(std::this_thread::get_id());//Ustal ID wątku.
-      //Jeśli istnieje stos dla wątku.
-      if (get_map_char().count(id)){
-        //Zdejmij loggera ze stosu. Jeśli to był ostatni logger na stosie, to wykasuj stos.
-        if (!get_map_char()[id].pop()){
-          get_map_char().erase(id);
-        }
-      }
+      //Zdejmij loggera ze stosu tego wątku.
+      get_stack_char().pop();
       TRY_END
     }
     std::ostream & ostream(flags_t severity){
-      std::lock_guard<std::mutex> lock(data().mutex);
       static BlackHole<char> blackHoleBuff;
       static std::basic_ostream<char> blackHole(&blackHoleBuff);
       TRY_BEGIN
-      std::thread::id id(std::this_thread::get_id());//Ustal ID wątku.
-      if (get_map_char().count(id)){//Jeśli istnieje stos dla wątku.
-        if(get_map_char()[id].size())//Jeśli są logery na stosie.
-          return(get_map_char()[id]().getLogger(severity));//Pobierz najwyższego loggera.
-      }
+      stack_char_t & stack(get_stack_char());//Stos logerów tego wątku.
+      if (stack.size())//Jeśli są logery na stosie.
+        return(stack().getLogger(severity));//Pobierz najwyższego loggera.
       TRY_END
       return(blackHole);
     }
@@ -661,9 +716,9 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     }
   }
   void restart(){
-    std::lock_guard<std::mutex> lock(input::data().mutex);
     TRY_BEGIN
-    get_map_char().clear();
+    //Kasuje stos logerów bieżącego wątku (stosy są per-wątek).
+    get_stack_char().clear();
     TRY_END
   }
 //===========================================
