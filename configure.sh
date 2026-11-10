@@ -77,11 +77,11 @@ if ! $RUN_PREFIX git submodule foreach 'git submodule init && git submodule upda
   echo "git submodule foreach git submodule update failed! ($?)" 
   exit 11
 fi
-if ! $RUN_PREFIX git submodule foreach 'test -f configure.sh && ./configure.sh' ; then
+if ! $RUN_PREFIX git submodule foreach 'test -f configure.sh && ./configure.sh || echo ok' ; then
   echo "git submodule foreach configure.sh failed! ($?)" 
   exit 12
 fi
-if ! $RUN_PREFIX git submodule foreach 'test -f Makefile && make' ; then
+if ! $RUN_PREFIX git submodule foreach 'test -f Makefile && make || echo ok' ; then
   echo "git submodule foreach make failed! ($?)" 
   exit 13
 fi

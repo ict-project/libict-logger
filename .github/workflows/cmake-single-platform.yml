@@ -35,15 +35,21 @@ jobs:
         echo GIT_VERSION=$GIT_VERSION
         echo GIT_VERSION=$GIT_VERSION >> "$GITHUB_ENV"
 
-    - name: Build
+    - name: Build (Debug)
       run: |
+        ./configure.sh Debug
+        make
+
+    - name: Test
+      run: make test
+
+    - name: Build (Release)
+      run: |
+        ./configure.sh Release
         make
         export PROJECT_NAME=$(cat ./build/project-name.txt)
         echo PROJECT_NAME=$PROJECT_NAME
         echo PROJECT_NAME=$PROJECT_NAME >> "$GITHUB_ENV"
-
-    - name: Test
-      run: make test
 
     - name: Package
       run: make package
