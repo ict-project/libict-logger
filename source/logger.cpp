@@ -704,6 +704,7 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
 #include "test.hpp"
 #include <sstream>
 #include <regex>
+#include <thread>
 
 REGISTER_TEST(logger,tc1){
   LOGGER_BASEDIR;
@@ -814,6 +815,7 @@ REGISTER_TEST(logger,tc2){
   if (std::getline(stream,line)){
     return(200);
   }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
   return(0);
 }
 REGISTER_TEST(logger,tc3){
@@ -874,6 +876,7 @@ REGISTER_TEST(logger,tc3){
   if (std::getline(stream,line)){
     return(200);
   }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
   return(0);
 }
 REGISTER_TEST(logger,tc4){
@@ -908,6 +911,238 @@ REGISTER_TEST(logger,tc4){
   if (std::getline(stream,line)){
     return(200);
   }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
+  return(0);
+}
+REGISTER_TEST(logger,tc5){
+  std::stringstream stream;
+  std::string line;
+  LOGGER_BASEDIR;
+  LOGGER_THREAD;
+  LOGGER_SET(std::cerr,ict::logger::none);
+  LOGGER_SET(std::cout,ict::logger::none);
+  LOGGER_SET("test",ict::logger::none);
+  LOGGER_SET(stream,ict::logger::errors);//Tylko CRITICAL i ERROR.
+  #include "enable-all.hpp"
+  LOGGER_CRIT<<__LOGGER__<<"Test "<<1<<std::endl;
+  LOGGER_ERR<<__LOGGER__<<"Test "<<2<<std::endl;
+  LOGGER_WARN<<__LOGGER__<<"Test "<<3<<std::endl;
+  LOGGER_NOTICE<<__LOGGER__<<"Test "<<4<<std::endl;
+  LOGGER_INFO<<__LOGGER__<<"Test "<<5<<std::endl;
+  LOGGER_DEBUG<<__LOGGER__<<"Test "<<6<<std::endl;
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("CRITICAL",1))){
+      std::cout<<"line="<<line<<std::endl;
+      return(1); 
+    }
+  } else return(101);
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("ERROR",2))){
+      std::cout<<"line="<<line<<std::endl;
+      return(2); 
+    }
+  } else return(102);
+  if (std::getline(stream,line)){
+    return(200);//Nic więcej nie powinno przejść przez filtr.
+  }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
+  return(0);
+}
+REGISTER_TEST(logger,tc6){
+  std::stringstream stream;
+  std::string line;
+  LOGGER_BASEDIR;
+  LOGGER_THREAD;
+  LOGGER_SET(std::cerr,ict::logger::none);
+  LOGGER_SET(std::cout,ict::logger::none);
+  LOGGER_SET("test",ict::logger::none);
+  #include "enable-all.hpp"
+  if (LOGGER_TEST(&stream)!=ict::logger::none) return(1);//Jeszcze nie ustawiony.
+  LOGGER_SET(stream,ict::logger::warnings);
+  if (LOGGER_TEST(&stream)!=ict::logger::warnings) return(2);//Filtr zapamiętany.
+  LOGGER_SET(stream,ict::logger::all);
+  if (LOGGER_TEST(&stream)!=ict::logger::all) return(3);//Filtr zmieniony.
+  LOGGER_SET(stream,ict::logger::none);
+  if (LOGGER_TEST(&stream)!=ict::logger::none) return(4);//Strumień usunięty.
+  LOGGER_ERR<<__LOGGER__<<"Test "<<1<<std::endl;
+  if (std::getline(stream,line)){
+    return(200);//Nic nie powinno trafić do usuniętego strumienia.
+  }
+  return(0);
+}
+REGISTER_TEST(logger,tc7){
+  std::stringstream stream;
+  std::string line;
+  LOGGER_BASEDIR;
+  LOGGER_THREAD;
+  LOGGER_SET(std::cerr,ict::logger::none);
+  LOGGER_SET(std::cout,ict::logger::none);
+  LOGGER_SET("test",ict::logger::none);
+  LOGGER_SET(stream);
+  #include "enable-all.hpp"
+  {
+    LOGGER_L(ict::logger::none,ict::logger::all,ict::logger::warning);//Wszystko buforowane, zrzut po WARNING.
+    LOGGER_INFO<<__LOGGER__<<"Test "<<1<<std::endl;
+    LOGGER_DEBUG<<__LOGGER__<<"Test "<<2<<std::endl;
+    LOGGER_WARN<<__LOGGER__<<"Test "<<3<<std::endl;
+    if (std::getline(stream,line)){
+      return(201);//Przed destrukcją warstwy bufor nie może być zrzucony.
+    }
+    stream.clear();
+  }
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("INFO",1,true))){
+      std::cout<<"line="<<line<<std::endl;
+      return(1); 
+    }
+  } else return(101);
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("DEBUG",2,true))){
+      std::cout<<"line="<<line<<std::endl;
+      return(2); 
+    }
+  } else return(102);
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("WARNING",3,true))){
+      std::cout<<"line="<<line<<std::endl;
+      return(3); 
+    }
+  } else return(103);
+  if (std::getline(stream,line)){
+    return(200);
+  }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
+  return(0);
+}
+REGISTER_TEST(logger,tc8){
+  std::stringstream stream;
+  std::string line;
+  LOGGER_BASEDIR;
+  LOGGER_THREAD;
+  LOGGER_SET(std::cerr,ict::logger::none);
+  LOGGER_SET(std::cout,ict::logger::none);
+  LOGGER_SET("test",ict::logger::none);
+  LOGGER_SET(stream);
+  #include "enable-all.hpp"
+  {
+    LOGGER_LAYER;//Warstwa zewnętrzna.
+    LOGGER_NOTICE<<__LOGGER__<<"Test "<<1<<std::endl;
+    {
+      LOGGER_LAYER;//Warstwa wewnętrzna - INFO/DEBUG buforowane.
+      LOGGER_INFO<<__LOGGER__<<"Test "<<2<<std::endl;
+      LOGGER_DEBUG<<__LOGGER__<<"Test "<<3<<std::endl;
+    }//Brak błędu - bufor wewnętrznej warstwy porzucony.
+    LOGGER_ERR<<__LOGGER__<<"Test "<<4<<std::endl;//Błąd już po zamknięciu wewnętrznej warstwy.
+  }
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("NOTICE",1))){
+      std::cout<<"line="<<line<<std::endl;
+      return(1); 
+    }
+  } else return(101);
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("ERROR",4))){
+      std::cout<<"line="<<line<<std::endl;
+      return(4); 
+    }
+  } else return(104);
+  if (std::getline(stream,line)){
+    return(200);//Test 2 i 3 nie mogą się pojawić.
+  }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
+  return(0);
+}
+REGISTER_TEST(logger,tc9){
+  std::stringstream stream;
+  std::string line;
+  LOGGER_BASEDIR;
+  LOGGER_THREAD;
+  LOGGER_SET(std::cerr,ict::logger::none);
+  LOGGER_SET(std::cout,ict::logger::none);
+  LOGGER_SET("test",ict::logger::none);
+  LOGGER_SET(stream);
+  #include "enable-all.hpp"
+  LOGGER_DEFAULT(ict::logger::all,ict::logger::none,ict::logger::none);//Wszystko bezpośrednio.
+  {
+    LOGGER_LAYER;//Korzysta z nowych wartości domyślnych.
+    LOGGER_DEBUG<<__LOGGER__<<"Test "<<1<<std::endl;//Normalnie byłby buforowany i porzucony.
+  }
+  LOGGER_DEFAULT();//Przywrócenie wartości domyślnych.
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("DEBUG",1))){
+      std::cout<<"line="<<line<<std::endl;
+      return(1); 
+    }
+  } else return(101);
+  if (std::getline(stream,line)){
+    return(200);
+  }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
+  return(0);
+}
+REGISTER_TEST(logger,tc10){
+  std::stringstream stream;
+  std::string line;
+  LOGGER_BASEDIR;
+  LOGGER_SET(std::cerr,ict::logger::none);
+  LOGGER_SET(std::cout,ict::logger::none);
+  LOGGER_SET("test",ict::logger::none);
+  LOGGER_SET(stream);
+  #include "enable-all.hpp"
+  LOGGER_RESTART;//Kasuje stos warstw bieżącego wątku.
+  LOGGER_ERR<<__LOGGER__<<"Test "<<1<<std::endl;//Brak warstwy - nic nie może się zapisać.
+  if (std::getline(stream,line)){
+    return(201);
+  }
+  stream.clear();
+  {
+    LOGGER_THREAD;//Nowa warstwa - logowanie znów działa.
+    LOGGER_ERR<<__LOGGER__<<"Test "<<2<<std::endl;
+  }
+  if (std::getline(stream,line)){
+    if (!std::regex_match(line,getRegex("ERROR",2))){
+      std::cout<<"line="<<line<<std::endl;
+      return(2); 
+    }
+  } else return(102);
+  if (std::getline(stream,line)){
+    return(200);
+  }
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
+  return(0);
+}
+REGISTER_TEST(logger,tc11){
+  const int count=50;
+  std::stringstream stream;
+  std::string line;
+  LOGGER_BASEDIR;
+  LOGGER_THREAD;
+  LOGGER_SET(std::cerr,ict::logger::none);
+  LOGGER_SET(std::cout,ict::logger::none);
+  LOGGER_SET("test",ict::logger::none);
+  LOGGER_SET(stream);
+  #include "enable-all.hpp"
+  auto worker=[count](){
+    LOGGER_THREAD;//Własna warstwa w każdym wątku.
+    for (int k=0;k<count;k++) LOGGER_NOTICE<<__LOGGER__<<"Test "<<7<<std::endl;
+  };
+  std::thread t1(worker),t2(worker);
+  t1.join();t2.join();
+  int lines=0;
+  //Osobny wzorzec - __PRETTY_FUNCTION__ w lambdzie ma inny format niż w zwykłej funkcji.
+  const std::regex re(
+    "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\(\\+\\d{4}\\) "
+    "NOTICE logger\\.cpp:\\d+ .* Test 7.*"
+  );
+  while (std::getline(stream,line)){
+    if (!std::regex_match(line,re)){
+      std::cout<<"line="<<line<<std::endl;
+      return(1); 
+    }
+    lines++;
+  }
+  if (lines!=2*count) return(2);//Wszystkie linie z obu wątków, bez przeplotu.
+  LOGGER_SET(stream,ict::logger::none);//Wyrejestrowanie lokalnego strumienia.
   return(0);
 }
 #endif
