@@ -44,6 +44,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 #include <stack>
 #include <mutex>
+#include <memory>
 #include <iostream>
 #include <filesystem>
 #include "syslog.h"
@@ -123,16 +124,16 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
   const flags_t nodebug(infos);
   const flags_t defaultValue(0x1<<7);
   //==========================================================================
-  void get_log_severity(flags_t severity,std::ostringstream & out){
-    static const std::map<flags_t,std::string> severity_map({
-      {critical,"CRITICAL"},
-      {error,"ERROR"},
-      {warning,"WARNING"},
-      {notice,"NOTICE"},
-      {info,"INFO"},
-      {debug,"DEBUG"}
-    });
-    if (severity_map.count(severity)) out<<severity_map.at(severity);
+  const char * get_log_severity(flags_t severity){
+    switch (severity){
+      case critical: return("CRITICAL");
+      case error: return("ERROR");
+      case warning: return("WARNING");
+      case notice: return("NOTICE");
+      case info: return("INFO");
+      case debug: return("DEBUG");
+      default: return("");
+    }
   }
   //==========================================================================
   class Syslog{
@@ -146,17 +147,17 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       ::closelog();
     }
     void log(flags_t severity,const std::string & str){
-      static const std::map<flags_t,int> severity_map({
-        {critical,LOG_CRIT},//critical conditions
-        {error,LOG_ERR},//error conditions
-        {warning,LOG_WARNING},//warning conditions
-        {notice,LOG_NOTICE},//normal, but significant, condition
-        {info,LOG_INFO},// informational message
-        {debug,LOG_DEBUG}// debug-level message
-      });
-      if ((filter&severity)&&(severity_map.count(severity))){
-        ::syslog(severity_map.at(severity),"%s",str.c_str());
+      int priority;
+      switch (severity){
+        case critical: priority=LOG_CRIT; break;//critical conditions
+        case error: priority=LOG_ERR; break;//error conditions
+        case warning: priority=LOG_WARNING; break;//warning conditions
+        case notice: priority=LOG_NOTICE; break;//normal, but significant, condition
+        case info: priority=LOG_INFO; break;// informational message
+        case debug: priority=LOG_DEBUG; break;// debug-level message
+        default: return;
       }
+      if (filter&severity) ::syslog(priority,"%s",str.c_str());
     }
     flags_t getFilter(){return(filter);}
   };
@@ -172,9 +173,15 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
   typedef log_line_t<wchar_t> log_wstring_t;
   //==========================================================================
   namespace output {
-    typedef std::map<std::ostream *,flags_t> ostream_map_t;
+    struct StreamSink{
+      std::ostream * stream;
+      flags_t filter;
+      std::mutex mutex;
+      StreamSink(std::ostream * stream_in,flags_t filter_in):stream(stream_in),filter(filter_in){}
+    };
+    typedef std::map<std::ostream *,std::shared_ptr<StreamSink>> ostream_map_t;
     struct Data{
-      //! Mutex dla strumieni wyjściowych.
+      //! Mutex chroniący konfigurację wyjść.
       std::mutex mutex;
       //! Zestaw strumieni wyjściowych ostream.
       ostream_map_t ostream_map;
@@ -185,19 +192,23 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       static Data data;
       return(data);
     }
-    template <typename S> 
-    void set(S * ostream,flags_t filter,std::map<S *,flags_t> & map){
+    void set(std::ostream * ostream,flags_t filter){
       TRY_BEGIN
       std::lock_guard<std::mutex> lock(data().mutex);
       if (filter&&ostream){
-        map[ostream]=filter;
-      } else if (map.count(ostream)) {
-        map.erase(ostream);
+        auto it=data().ostream_map.find(ostream);
+        if (it==data().ostream_map.end()){
+          data().ostream_map.emplace(ostream,std::make_shared<StreamSink>(ostream,filter));
+        } else {
+          it->second->filter=filter;
+        }
+      } else {
+        data().ostream_map.erase(ostream);
       }
       TRY_END
     }
     void set(std::ostream & ostream,flags_t filter){
-      set(&ostream,filter,data().ostream_map);
+      set(&ostream,filter);
     }
     void set(const std::string & ident,flags_t filter){
       TRY_BEGIN
@@ -210,18 +221,13 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       TRY_END
     }
 
-    template <typename S> 
-    flags_t test(S * ostream,std::map<S *,flags_t> & map){
+    flags_t test(std::ostream * ostream){
       TRY_BEGIN
       std::lock_guard<std::mutex> lock(data().mutex);
-      if (map.count(ostream)){
-        return(map.at(ostream));
-      }
+      auto it=data().ostream_map.find(ostream);
+      if (it!=data().ostream_map.end()) return(it->second->filter);
       TRY_END
       return(0x0);
-    }
-    flags_t test(std::ostream * ostream){
-      return(test(ostream,data().ostream_map));
     }
     flags_t test(){
       TRY_BEGIN
@@ -232,73 +238,46 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       TRY_END
       return(0x0);
     }
-    //Zapisuje pojedynczy log w syslog.
-    static inline void log_syslog_out(flags_t severity,const std::string & in){
+    static void log_out(const log_line_t<char> & in){
       TRY_BEGIN
-      if (data().syslog.get()) data().syslog->log(severity,in);
-      TRY_END
-    }
-    //Zapisuje pojedynczy log w syslog.
-    template <typename charT>
-    static inline void log_syslog_out(const log_line_t<charT> & in){
-      TRY_BEGIN
-      std::lock_guard<std::mutex> lock(data().mutex);
-      if (data().syslog.get()){//Jeśli syslog jest ustawiony
-        if ((in.severity)&(data().syslog->getFilter())){//Jeśli został ustawiony i poziom logu się zgadza.
-          std::basic_ostringstream<charT> out;
-          //Jeśli jest to wpis buforowany, to go oznacz i wstaw czas powstania tego logu.
-          if (in.buffered) out<<out.widen('|')<<out.widen(' ')<<in.time<<out.widen(' ');
-          //Wstaw znacznik severity do strumienia.
-          get_log_severity(in.severity,out);
-          //Wstaw spację do strumienia.
-          out<<out.widen(' ')<<in.line;
-          //Wstaw do syslog.
-          log_syslog_out(in.severity,out.str());
+      std::vector<std::shared_ptr<StreamSink>> streams;
+      bool syslog_enabled=false;
+      {
+        std::lock_guard<std::mutex> lock(data().mutex);
+        for (const auto & entry:data().ostream_map){
+          if (in.severity&entry.second->filter) streams.push_back(entry.second);
+        }
+        syslog_enabled=data().syslog&&((in.severity)&data().syslog->getFilter());
+      }
+      if (streams.empty()&&!syslog_enabled) return;
+
+      std::ostringstream timestamp_out;
+      timestamp_out<<in.time;
+      const std::string timestamp(timestamp_out.str());
+      const char * severity(get_log_severity(in.severity));
+
+      if (!streams.empty()){
+        std::ostringstream message_out;
+        message_out<<timestamp<<' ';
+        if (in.buffered) message_out<<"| ";
+        message_out<<severity<<' '<<in.line<<'\n';
+        const std::string message(message_out.str());
+        for (const std::shared_ptr<StreamSink> & sink:streams){
+          std::lock_guard<std::mutex> lock(sink->mutex);
+          *sink->stream<<message;
+          sink->stream->flush();
         }
       }
-      TRY_END
-    }
 
-    //Zapisuje pojedynczy log w strumieniach wyjściowych w jednym strumieniu.
-    template <typename charT> 
-    static inline void log_stream_out(const std::basic_string<charT>& in, std::basic_ostream<charT> & out){
-      TRY_BEGIN
-      out<<in;
-      TRY_END
-    }
-    //Zapisuje pojedynczy log w strumieniach wyjściowych jednego typu.
-    template <typename charIn,typename charOut> 
-    static inline void log_stream_out(flags_t severity,const std::basic_string<charIn>& in, std::map<std::basic_ostream<charOut>*,flags_t> & out){
-      TRY_BEGIN
-      std::lock_guard<std::mutex> lock(data().mutex);
-      for (typename std::map<std::basic_ostream<charOut>*,flags_t>::iterator it=out.begin();it!=out.end();++it){//Przejdź po liście strumieni.
-        if (severity&(it->second))//Jeśli filtr przepuszcza ten wpis
-          if (it->first){//Jeśli to nie jest wpis dotyczący logera systemowego.
-            log_stream_out(in,*(it->first));//Zapisz do strumienia.
-            it->first->flush();
-          }
+      if (syslog_enabled){
+        std::string message;
+        if (in.buffered) message="| "+timestamp+" ";
+        message+=severity;
+        message+=' ';
+        message+=in.line;
+        std::lock_guard<std::mutex> lock(data().mutex);
+        if (data().syslog) data().syslog->log(in.severity,message);
       }
-      TRY_END
-    }
-    //Zapisuje pojedynczy log w strumieniach wyjściowych.
-    template <typename charT> 
-    static void log_stream_out(const log_line_t<charT> & in){
-      TRY_BEGIN
-      std::basic_ostringstream<charT> out;
-      // Wstaw czas.
-      out<<in.time;
-      //Wstaw spację do strumienia.
-      out<<out.widen(' ');
-      //Jeśli jest to wpis buforowany, to go oznacz.
-      if (in.buffered) out<<out.widen('|')<<out.widen(' ');
-      //Wstaw znacznik severity do strumienia.
-      get_log_severity(in.severity,out);
-      //Wstaw spację do strumienia.
-      out<<out.widen(' ');
-      //Wstaw linię.
-      out<<in.line<<std::endl;
-      //Zapisz do wszystkich strumieni wyjściowych ostream.
-      log_stream_out(in.severity,out.str(),data().ostream_map);
       TRY_END
     }
   }
@@ -426,15 +405,13 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
                   log_warn.line+=") ";
                   log_warn.line+="Bufor loggera osiągnął maksymalny rozmiar!";
                   log_warn.severity=warning;
-                  output::log_stream_out(log_warn);//Zapisz w strumieniach wyjściowych.
-                  output::log_syslog_out(log_warn);//Zapisz w syslog.
+                  output::log_out(log_warn);//Zapisz do skonfigurowanych wyjść.
                   log_buffer->push_back(log_line);//Dodaj do bufora.
                 }
             }
           }
       } else {//Jeśli zapis nie jest buforowany.
-        output::log_stream_out(log_line);//Zapisz w strumieniach wyjściowych.
-        output::log_syslog_out(log_line);//Zapisz w syslog.
+        output::log_out(log_line);//Zapisz do skonfigurowanych wyjść.
       }
     }
     //!
@@ -555,8 +532,7 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     void doDump(){
       TRY_BEGIN
       for (log_line_t<charT> & l: log_buffer){//Cały bufor.
-        output::log_stream_out(l);//Zapisz w strumieniach wyjściowych.
-        output::log_syslog_out(l);//Zapisz w syslog.
+        output::log_out(l);//Zapisz do skonfigurowanych wyjść.
       }
       log_buffer.clear();//Wyczyść bufor.
       TRY_END
