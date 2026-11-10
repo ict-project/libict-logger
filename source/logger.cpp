@@ -138,9 +138,11 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
   //==========================================================================
   class Syslog{
   private:
+    //! Kopia identa - openlog() zapamiętuje wskaźnik, nie kopiuje łańcucha.
+    std::string ident;
     flags_t filter;
   public:
-    Syslog(const std::string & ident,flags_t filter_in):filter(filter_in){
+    Syslog(const std::string & ident_in,flags_t filter_in):ident(ident_in),filter(filter_in){
       ::openlog(ident.c_str(),LOG_PID,LOG_USER);
     }
     ~Syslog(){
@@ -171,6 +173,21 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
   };
   typedef log_line_t<char> log_string_t;
   typedef log_line_t<wchar_t> log_wstring_t;
+  //==========================================================================
+  //! Przekazuje linię loga (char) bez konwersji.
+  inline const log_string_t & to_log_string(const log_string_t & in){
+    return(in);
+  }
+  //! Konwertuje linię loga (wchar_t) do postaci char (znaki spoza ASCII zamieniane na '?').
+  inline log_string_t to_log_string(const log_wstring_t & in){
+    log_string_t out;
+    out.buffered=in.buffered;
+    out.time=in.time;
+    out.severity=in.severity;
+    out.line.reserve(in.line.size());
+    for (const wchar_t c:in.line) out.line+=((0x20<=c)&&(c<0x7f))?static_cast<char>(c):'?';
+    return(out);
+  }
   //==========================================================================
   namespace output {
     struct StreamSink{
@@ -214,6 +231,8 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       TRY_BEGIN
       std::lock_guard<std::mutex> lock(data().mutex);
       if (filter){
+        //Najpierw closelog() starego obiektu, dopiero potem openlog() nowego.
+        data().syslog.reset(nullptr);
         data().syslog.reset(new Syslog(ident,filter));
       } else if (data().syslog.get()) {
         data().syslog.reset(nullptr);
@@ -271,7 +290,10 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
 
       if (syslog_enabled){
         std::string message;
-        if (in.buffered) message="| "+timestamp+" ";
+        if (in.buffered){//Ten sam format, co dla strumieni: timestamp przed "| ".
+          message=timestamp;
+          message+=" | ";
+        }
         message+=severity;
         message+=' ';
         message+=in.line;
@@ -411,7 +433,7 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
             }
           }
       } else {//Jeśli zapis nie jest buforowany.
-        output::log_out(log_line);//Zapisz do skonfigurowanych wyjść.
+        output::log_out(to_log_string(log_line));//Zapisz do skonfigurowanych wyjść.
       }
     }
     //!
@@ -532,14 +554,15 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
     void doDump(){
       TRY_BEGIN
       for (log_line_t<charT> & l: log_buffer){//Cały bufor.
-        output::log_out(l);//Zapisz do skonfigurowanych wyjść.
+        output::log_out(to_log_string(l));//Zapisz do skonfigurowanych wyjść.
       }
       log_buffer.clear();//Wyczyść bufor.
       TRY_END
     }
     basic_ostream_t & getLogger(flags_t severity){
-      static BlackHole<charT> blackHoleBuff;
-      static basic_ostream_t blackHole(&blackHoleBuff);
+      //thread_local - wspólny statyczny strumień byłby współdzielony między wątkami bez synchronizacji.
+      static thread_local BlackHole<charT> blackHoleBuff;
+      static thread_local basic_ostream_t blackHole(&blackHoleBuff);
       TRY_BEGIN
       const static std::set<ict::logger::flags_t> severity_set({
         critical,error,warning,
@@ -677,8 +700,9 @@ std::ostream & operator<<(std::ostream & os,file_struct f){
       TRY_END
     }
     std::ostream & ostream(flags_t severity){
-      static BlackHole<char> blackHoleBuff;
-      static std::basic_ostream<char> blackHole(&blackHoleBuff);
+      //thread_local - wspólny statyczny strumień byłby współdzielony między wątkami bez synchronizacji.
+      static thread_local BlackHole<char> blackHoleBuff;
+      static thread_local std::basic_ostream<char> blackHole(&blackHoleBuff);
       TRY_BEGIN
       stack_char_t & stack(get_stack_char());//Stos logerów tego wątku.
       if (stack.size())//Jeśli są logery na stosie.
