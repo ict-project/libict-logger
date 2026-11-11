@@ -4,9 +4,8 @@ This code implements a handy logger for C++ apps.
 
 See:
 * [logger](source/logger.md) for more details.
+* [rotate](source/rotate.md) for file rotation details.
 
-Releases:
-* Branch release-v1
 
 ## Building instructions
 

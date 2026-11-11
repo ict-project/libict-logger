@@ -19,6 +19,7 @@ file(GLOB CMAKE_HEADER_LIST . *.hpp)
 set(CMAKE_SOURCE_FILES 
   info.cpp
   logger.cpp
+  rotate.cpp
 )
 
 add_library(ict-static-${LIBRARY_NAME} STATIC ${CMAKE_SOURCE_FILES})
@@ -55,6 +56,10 @@ add_test(NAME ict-logger-tc8 COMMAND ${PROJECT_NAME}-test ict logger tc8)
 add_test(NAME ict-logger-tc9 COMMAND ${PROJECT_NAME}-test ict logger tc9)
 add_test(NAME ict-logger-tc10 COMMAND ${PROJECT_NAME}-test ict logger tc10)
 add_test(NAME ict-logger-tc11 COMMAND ${PROJECT_NAME}-test ict logger tc11)
+add_test(NAME ict-rotate-tc1 COMMAND ${PROJECT_NAME}-test ict rotate tc1)
+add_test(NAME ict-rotate-tc2 COMMAND ${PROJECT_NAME}-test ict rotate tc2)
+add_test(NAME ict-rotate-tc3 COMMAND ${PROJECT_NAME}-test ict rotate tc3)
+add_test(NAME ict-rotate-tc4 COMMAND ${PROJECT_NAME}-test ict rotate tc4)
 
 include(../libict-dev-tools/cpack-include.cmake)
 ################################################################
